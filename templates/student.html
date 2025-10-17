@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Student - Bus Tracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/main.css" />
+</head>
+<body>
+  <header id="header">
+    <div class="status-bar">
+      <div class="status-main">
+        <span id="statusText">At </span>
+        <span id="curr" class="highlight">...</span>
+        <span id="nextStop"></span>
+      </div>
+      <span id="lastUpdate" class="timestamp-badge">--:--</span>
+    </div>
+  </header>
+  <div id="map"></div>
+  <div class="actions">
+    <button id="arrivedBtn" class="btn">ARRIVED</button>
+    <button id="shareLocationBtn" class="location-btn" title="Coming Soon">
+      <svg viewBox="0 0 24 24" style="transform: translateY(1px)">
+        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zM12 6.5l2.5 2.5h-2v3h-1v-3h-2L12 6.5z"/>
+      </svg>
+    </button>
+    <button id="centerBusBtn" class="center-btn" title="Center on Bus">
+      <svg viewBox="0 0 24 24">
+        <path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3c-.46-4.17-3.77-7.48-7.94-7.94V1h-2v2.06C6.83 3.52 3.52 6.83 3.06 11H1v2h2.06c.46 4.17 3.77 7.48 7.94 7.94V23h2v-2.06c4.17-.46 7.48-3.77 7.94-7.94H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <style>
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 120px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #333;
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 24px;
+      font-size: 14px;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      z-index: 2000;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    /* Center on bus button */
+    .center-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid #ddd;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      transition: all 0.3s ease;
+      flex-shrink: 0;
+    }
+
+    .center-btn:active {
+      transform: scale(0.95);
+      background: #f0f0f0;
+    }
+
+    .center-btn svg {
+      width: 24px;
+      height: 24px;
+      fill: #333;
+    }
+    /* Location sharing button styles */
+    .location-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #ff3b30;
+      border: none;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      transition: all 0.3s ease;
+      flex-shrink: 0;
+    }
+
+    .location-btn:active {
+      transform: scale(0.95);
+    }
+
+    .location-btn.active {
+      background: #34c759;
+    }
+
+    .location-btn svg {
+      width: 28px;
+      height: 28px;
+      fill: #000;
+    }
+
+    /* Updated actions container */
+    .actions {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #fff;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+      min-height: 88px;
+      box-sizing: border-box;
+    }
+
+    .actions .btn {
+      flex: 1;
+      max-width: 280px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+    }
+  </style>
+
+  <script>
+    const POLL_MS = 1000;
+    const BUS_ID = "{{ bus_id }}";
+    const STUDENT_ID = 'S1';
+
+    // Show toast notification
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2000);
+    }
+  </script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let map = L.map('map');
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+    // Share location button - shows "Coming Soon" message
+    document.getElementById('shareLocationBtn').addEventListener('click', function() {
+      showToast('Coming Soon');
+    });
+
+    // Center on bus button
+    document.getElementById('centerBusBtn').addEventListener('click', function() {
+      if (busMarker) {
+        const pos = busMarker.getLatLng();
+        map.flyTo(pos, 16, {
+          duration: 1.0,
+          easeLinearity: 0.5
+        });
+      }
+    });
+
+    // Create custom bus icon
+    const busIcon = L.divIcon({ 
+      html: `<div style="font-size: 36px; text-align: center;">🚌</div>`,
+      className: 'bus-marker',
+      iconSize: [48, 48],
+      iconAnchor: [24, 24]
+    });
+
+    // Style for bus marker
+    const style = document.createElement('style');
+    style.textContent = `
+      .bus-marker {
+        background: #4a90e2;
+        border: 3px solid white;
+        border-radius: 50%;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      }
+    `;
+    document.head.appendChild(style);
+
+    let busMarker = null;
+    let stops = [];
+    let stopMarkers = [];
+
+    // Initialize stops and create markers
+    fetch('/stops').then(r=>r.json()).then(data => {
+      stops = data;
+      const pts = stops.map(s => [s.lat, s.lon]);
+      
+      // Create stop markers
+      stops.forEach((s, i) => {
+        const marker = L.marker([s.lat, s.lon])
+          .addTo(map)
+          .bindPopup(s.name);
+        stopMarkers.push(marker);
+      });
+
+      if (pts.length) {
+        map.fitBounds(pts, { padding: [30,30] });
+      }
+
+      // Create bus marker at the first stop
+      if (stops.length > 0) {
+        const firstStop = stops[0];
+        busMarker = L.marker([firstStop.lat, firstStop.lon], {
+          icon: busIcon,
+          zIndexOffset: 1000 // Keep bus marker above stop markers
+        }).addTo(map);
+      }
+    });
+
+    function namesFor(state) {
+      const idx = state.stop_index || 0;
+      const curr = stops.find(s => s.seq === idx);
+      const next = stops.length ? stops[Math.min(idx + 1, stops.length - 1)] : null;
+      return { currName: curr ? curr.name : 'Unknown', nextName: next ? next.name : '' };
+    }
+
+    function loadState() {
+      fetch(`/bus/${BUS_ID}`).then(r=>r.json()).then(state => {
+        const isMoving = state.status === 'departing';
+        const { currName, nextName } = namesFor(state);
+        
+        // Update status text and stop name
+        document.getElementById('statusText').textContent = isMoving ? 'Moving to ' : 'At ';
+        document.getElementById('curr').textContent = isMoving ? nextName : currName;
+        document.getElementById('nextStop').textContent = '';
+        
+        // Update timestamp in HH:MM format
+        const now = new Date();
+        const time = now.getHours().toString().padStart(2, '0') + ':' + 
+                    now.getMinutes().toString().padStart(2, '0');
+        document.getElementById('lastUpdate').textContent = time;
+        
+        // Update bus position from GPS coordinates (no auto-centering)
+        if (state.lat && state.lon && busMarker) {
+          busMarker.setLatLng([state.lat, state.lon]);
+        }
+
+        if (state.stop_id) updateCount(state.stop_id);
+      }).catch(()=>{});
+    }
+
+    function updateCount(stop_id) {
+      const el = document.getElementById('cnt');
+      if (!el) return;
+      fetch(`/confirmations?bus_id=${BUS_ID}&stop_id=${stop_id}`).then(r=>r.json()).then(x => {
+        el.textContent = x.confirmations;
+      }).catch(()=>{});
+    }
+
+    document.getElementById('arrivedBtn').onclick = () => {
+      fetch('/student/arrived', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ bus_id: BUS_ID, student_id: STUDENT_ID })
+      }).then(r => r.json()).then(resp => {
+        // No banner element in current layout; keep behavior minimal
+        if (resp.state && resp.state.stop_id) updateCount(resp.state.stop_id);
+        loadState();
+      });
+    };
+
+    loadState();
+    setInterval(loadState, POLL_MS);
+  </script>
+</body>
+</html> 

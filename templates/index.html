@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bus Tracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/main.css" />
+</head>
+<body>
+  <header id="header">Current stop: <span id="stopName">...</span></header>
+  <div id="map"></div>
+
+  <script>
+    const POLL_MS = 1000; // polling faster for near real-time
+    const BUS_ID = "{{ bus_id }}";
+  </script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    let map = L.map('map');
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    // Bus icon as an emoji for clarity
+    const busIcon = L.divIcon({ html: '🚌', className: 'bus-icon', iconSize: [40,40] });
+
+    let busMarker = null;
+    let lastLat = null, lastLon = null;
+
+    fetch('/stops').then(r=>r.json()).then(stops => {
+      const pts = stops.map(s => [s.lat, s.lon]);
+      stops.forEach((s, i) => L.marker([s.lat, s.lon]).addTo(map).bindPopup(`${i}. ${s.name}`));
+      if (pts.length) {
+        map.fitBounds(pts, { padding: [30,30] });
+      }
+    });
+
+    function updateBus() {
+      fetch(`/bus/${BUS_ID}`).then(r=>r.json()).then(state => {
+        document.getElementById('stopName').textContent = state.stop_name || 'Unknown';
+        if (state.lat == null || state.lon == null) return;
+        if (!busMarker) {
+          busMarker = L.marker([state.lat, state.lon], {icon: busIcon}).addTo(map);
+          map.setView([state.lat, state.lon]);
+        } else {
+          if (lastLat !== state.lat || lastLon !== state.lon) {
+            busMarker.setLatLng([state.lat, state.lon]);
+            map.setView([state.lat, state.lon]);
+          }
+        }
+        lastLat = state.lat; lastLon = state.lon;
+      }).catch(()=>{});
+    }
+
+    updateBus();
+    setInterval(updateBus, POLL_MS);
+  </script>
+</body>
+</html> 

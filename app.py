@@ -1,0 +1,547 @@
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from typing import Dict, Any
+from functools import wraps
+from datetime import timedelta, datetime, time
+import db as dbm
+import threading
+import time as time_module
+
+import os
+from datetime import datetime, timezone, timedelta
+
+app = Flask(__name__)
+
+# Use environment variable for secret key in production
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-here')
+
+# Determine if we're running in production
+is_production = os.environ.get('FLASK_ENV') == 'production'
+
+# Configure session to be more persistent and support multiple users
+app.config.update(
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
+    SESSION_COOKIE_SECURE=is_production,  # Use secure cookies in production
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_NAME='bus_tracker_session'
+)
+
+# Track active sessions
+active_sessions = {}
+
+BUS_ID = "S1/A"  # default bus id
+QUORUM = 1      # change quorum here if needed
+
+# Track last driver location update time
+last_driver_update = {}
+
+# Dummy user database - In a real app, this would be in a database
+USERS = {
+    "driver1": {
+        "password": "driverpass123",
+        "role": "driver",
+        "bus_id": "S1/A"  # Assigned bus ID
+    },
+    "student1": {
+        "password": "studentpass123",
+        "role": "student"
+    },
+    "student2": {
+        "password": "studentpass123",
+        "role": "student"
+    },
+    "student3": {
+        "password": "studentpass123",
+        "role": "student"
+    }
+}
+
+from uuid import uuid4
+
+def generate_session_id():
+    return str(uuid4())
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        session_id = session.get('session_id')
+        if not session_id or session_id not in active_sessions:
+            session.clear()
+            return redirect(url_for('login'))
+        # Update session data from active_sessions
+        session.update(active_sessions[session_id])
+        return f(*args, **kwargs)
+    return decorated_function
+
+def role_required(role):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            session_id = session.get('session_id')
+            if not session_id or session_id not in active_sessions:
+                session.clear()
+                return redirect(url_for('login'))
+            user_data = active_sessions[session_id]
+            if user_data.get('role') != role:
+                return redirect(url_for('login'))
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+def update_session_data():
+    """Update active_sessions with current session data"""
+    session_id = session.get('session_id')
+    if session_id and session_id in active_sessions:
+        # Update stored session data
+        active_sessions[session_id].update({
+            'username': session.get('username'),
+            'role': session.get('role'),
+            'bus_id': session.get('bus_id'),
+            'last_active': datetime.now()
+        })
+
+init_done = False
+bus_status: Dict[str, str] = {}  # e.g., { BUS_ID: "departing" }
+
+def reset_bus_to_start():
+    """Reset bus to starting stop - used for daily reset and manual reset"""
+    dbm.reset_bus_to_starting_stop(BUS_ID)
+    bus_status.pop(BUS_ID, None)
+    last_driver_update.pop(BUS_ID, None)
+    app.logger.info(f"Bus {BUS_ID} reset to starting stop")
+
+def daily_reset_scheduler():
+    """Background thread that resets the bus at midnight every day"""
+    while True:
+        now = datetime.now()
+        # Calculate time until next midnight
+        tomorrow = now + timedelta(days=1)
+        midnight = datetime.combine(tomorrow.date(), time(0, 0, 0))
+        seconds_until_midnight = (midnight - now).total_seconds()
+        
+        # Sleep until midnight
+        time_module.sleep(seconds_until_midnight)
+        
+        # Reset the bus
+        reset_bus_to_start()
+        app.logger.info("Daily automatic reset completed at midnight")
+
+@app.before_request
+def ensure_init() -> None:
+    global init_done
+    if not init_done:
+        dbm.init_db()
+        # Start daily reset scheduler in background thread
+        reset_thread = threading.Thread(target=daily_reset_scheduler, daemon=True)
+        reset_thread.start()
+        init_done = True
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        user = USERS.get(username)
+        if user and user['password'] == password:
+            # Generate new session
+            session.permanent = True
+            session_id = generate_session_id()
+            session['session_id'] = session_id
+            session['username'] = username
+            session['role'] = user['role']
+            
+            # Store session data
+            session_data = {
+                'username': username,
+                'role': user['role'],
+                'last_active': datetime.now()
+            }
+            
+            if user['role'] == 'driver':
+                bus_id = user.get('bus_id', BUS_ID)
+                session['bus_id'] = bus_id
+                session_data['bus_id'] = bus_id
+            
+            # Store in active sessions
+            active_sessions[session_id] = session_data
+            
+            if user['role'] == 'driver':
+                return redirect(url_for('driver_page'))
+            else:
+                return redirect(url_for('student_page'))
+        
+        return render_template('login.html', error='Invalid username or password')
+    
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session_id = session.get('session_id')
+    if session_id:
+        active_sessions.pop(session_id, None)
+    session.clear()
+    return redirect(url_for('login'))
+
+# Add session cleanup for inactive sessions
+def cleanup_inactive_sessions():
+    """Remove sessions that have been inactive for more than the session lifetime"""
+    now = datetime.now()
+    max_age = timedelta(days=7)
+    inactive_sessions = [
+        sid for sid, data in active_sessions.items()
+        if now - data['last_active'] > max_age
+    ]
+    for sid in inactive_sessions:
+        active_sessions.pop(sid, None)
+
+# Add before_request handler to update session activity
+@app.before_request
+def before_request():
+    global init_done
+    if not init_done:
+        dbm.init_db()
+        init_done = True
+    
+    # Update last active time for current session
+    if request.endpoint != 'static':
+        update_session_data()
+        cleanup_inactive_sessions()
+
+@app.get("/")
+def home():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    if session['role'] == 'driver':
+        return redirect(url_for('driver_page'))
+    return redirect(url_for('student_page'))
+
+@app.get("/driver")
+@login_required
+@role_required('driver')
+def driver_page():
+    return render_template("driver.html", bus_id=session.get('bus_id', BUS_ID))
+
+@app.get("/student")
+@login_required
+@role_required('student')
+def student_page():
+    return render_template("student.html", bus_id=BUS_ID)
+
+
+# Rate limiting for location updates (per user)
+last_update_time = {}
+MIN_UPDATE_INTERVAL = 1.0  # seconds
+
+# --- API ---
+@app.post("/location/share")
+@login_required
+def share_location():
+    """Only for drivers - students get 'coming soon' message on frontend"""
+    try:
+        user_type = session.get('role')
+        
+        # Only allow drivers to share location
+        if user_type != 'driver':
+            return jsonify({"error": "Location sharing not available for students"}), 403
+        
+        # Rate limiting check
+        user_id = session.get('username')
+        now = datetime.now()
+        if user_id in last_update_time:
+            time_since_last = (now - last_update_time[user_id]).total_seconds()
+            if time_since_last < MIN_UPDATE_INTERVAL:
+                return jsonify({
+                    "error": "Too many updates",
+                    "retry_after": MIN_UPDATE_INTERVAL - time_since_last
+                }), 429
+        
+        # Parse and validate input
+        data = request.get_json(force=True)
+        try:
+            bus_id = data.get("bus_id", BUS_ID)
+            lat = float(data.get("lat"))
+            lon = float(data.get("lon"))
+            accuracy = float(data.get("accuracy", 20.0))
+            
+            # Basic validation
+            if not (-90 <= lat <= 90) or not (-180 <= lon <= 180) or accuracy <= 0:
+                return jsonify({"error": "Invalid coordinates or accuracy"}), 400
+                
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid location data"}), 400
+        
+        # Update last driver update time
+        last_driver_update[bus_id] = now
+        
+        # Update driver's location
+        dbm.update_user_location(bus_id, user_id, user_type, lat, lon, accuracy)
+        last_update_time[user_id] = now
+        
+        # Update bus location directly with driver's GPS
+        state = dbm.update_bus_location(bus_id, lat, lon)
+        
+        # Check proximity to stops and auto-detect arrival
+        proximity_result = dbm.check_stop_proximity(bus_id, lat, lon, radius_meters=40)
+        
+        if proximity_result:
+            # Driver is near a stop
+            stop_id = proximity_result['id']
+            stop_index = proximity_result['seq']
+            
+            # Auto-update to this stop if not already there
+            current_state = dbm.get_bus_state(bus_id)
+            if current_state and current_state['stop_index'] != stop_index:
+                state = dbm.set_bus_to_stop(bus_id, stop_index)
+                bus_status[bus_id] = "arrived"
+            elif current_state and current_state['stop_index'] == stop_index:
+                # Already at this stop
+                bus_status[bus_id] = "arrived"
+        else:
+            # Not near any stop - mark as departing/en route
+            if bus_id in bus_status:
+                bus_status[bus_id] = "departing"
+        
+        # Get updated state and stop info
+        state = dbm.get_bus_state(bus_id)
+        if state:
+            state = dict(state)
+            stop = dbm.current_stop_for_index(state.get("stop_index", 0))
+            state.update({
+                "stop_name": stop["name"] if stop else None,
+                "stop_id": stop["id"] if stop else None,
+                "status": bus_status.get(bus_id),
+                "accuracy": accuracy
+            })
+        
+        return jsonify(state)
+        
+    except Exception as e:
+        app.logger.error(f"Error in location sharing: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.get("/location/active")
+@login_required
+def get_active_locations():
+    """Get all active location sharers for the bus"""
+    bus_id = request.args.get("bus_id", BUS_ID)
+    
+    try:
+        # Get recent locations
+        locations = dbm.get_recent_locations(bus_id, max_age_seconds=60)
+        if not locations:
+            return jsonify({
+                "active_users": 0,
+                "clusters": [],
+                "last_update": None
+            })
+        
+        # Get current clusters
+        clusters = dbm.find_location_clusters(bus_id, max_radius=80.0, min_points=2)
+        
+        # Process driver information
+        driver_locations = [loc for loc in locations if loc['user_type'] == 'driver']
+        driver_info = None
+        if driver_locations:
+            latest_driver = max(driver_locations, key=lambda x: x['timestamp'])
+            driver_info = {
+                "last_update": latest_driver['timestamp'],
+                "accuracy": latest_driver['accuracy']
+            }
+        
+        # Process student information
+        student_locations = [loc for loc in locations if loc['user_type'] == 'student']
+        student_info = {
+            "count": len(student_locations),
+            "last_update": max(loc['timestamp'] for loc in student_locations) if student_locations else None,
+            "average_accuracy": sum(loc['accuracy'] for loc in student_locations) / len(student_locations) if student_locations else None
+        }
+        
+        # Process cluster information
+        cluster_info = [{
+            "center_lat": c['center_lat'],
+            "center_lon": c['center_lon'],
+            "radius": c['radius'],
+            "point_count": len(c['points']),
+            "is_majority": len(c['points']) > len(locations) / 2,
+            "source": c['source']
+        } for c in clusters]
+        
+        return jsonify({
+            "driver": driver_info,
+            "students": student_info,
+            "clusters": cluster_info,
+            "active_users": len(locations),
+            "last_update": max(loc['timestamp'] for loc in locations)
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error getting active locations: {str(e)}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.get("/bus/<path:bus_id>")
+@login_required
+def get_bus(bus_id: str):
+    state = dbm.get_bus_state(bus_id)
+    if not state:
+        return jsonify({}), 404
+    stop = dbm.current_stop_for_index(state["stop_index"])
+    state = dict(state)
+    state["stop_name"] = stop["name"] if stop else None
+    state["stop_id"] = stop["id"] if stop else None
+    state["status"] = bus_status.get(bus_id)
+    return jsonify(state)
+
+@app.get("/stops")
+@login_required
+def get_stops():
+    rows = dbm.get_stops()
+    return jsonify([dict(r) for r in rows])
+
+@app.post("/driver/departed")
+@login_required
+@role_required('driver')
+def driver_departed():
+    """Only use if driver location is outdated (>30 seconds)"""
+    data = request.get_json(force=True)
+    bus_id = data.get("bus_id", BUS_ID)
+    
+    # verify the driver is assigned to this bus
+    if bus_id != session.get('bus_id'):
+        return jsonify({"error": "unauthorized"}), 403
+    
+    # Check if we have recent driver location
+    now = datetime.now()
+    if bus_id in last_driver_update:
+        seconds_since_update = (now - last_driver_update[bus_id]).total_seconds()
+        if seconds_since_update < 30:
+            return jsonify({
+                "error": "Using live GPS - manual control disabled",
+                "message": "Bus position is being tracked via GPS"
+            }), 400
+    
+    # Fallback: set status to departing without moving
+    bus_status[bus_id] = "departing"
+    state = dbm.get_bus_state(bus_id)
+    if not state:
+        return jsonify({}), 404
+    stop = dbm.current_stop_for_index(state["stop_index"])
+    resp = dict(state)
+    resp["stop_name"] = stop["name"] if stop else None
+    resp["stop_id"] = stop["id"] if stop else None
+    resp["status"] = bus_status.get(bus_id)
+    return jsonify(resp)
+
+@app.post("/driver/arrived")
+@login_required
+@role_required('driver')
+def driver_arrived():
+    """Only use if driver location is outdated (>30 seconds)"""
+    data = request.get_json(force=True)
+    bus_id = data.get("bus_id", BUS_ID)
+    
+    # verify the driver is assigned to this bus
+    if bus_id != session.get('bus_id'):
+        return jsonify({"error": "unauthorized"}), 403
+    
+    # Check if we have recent driver location
+    now = datetime.now()
+    if bus_id in last_driver_update:
+        seconds_since_update = (now - last_driver_update[bus_id]).total_seconds()
+        if seconds_since_update < 30:
+            return jsonify({
+                "error": "Using live GPS - manual control disabled",
+                "message": "Bus position is being tracked via GPS"
+            }), 400
+    
+    action = data.get("action")
+    if action != "arrived":
+        return jsonify({"error": "invalid action"}), 400
+    
+    # Fallback: clear status when arriving
+    bus_status.pop(bus_id, None)
+    state = dbm.move_bus_to_next_stop(bus_id)
+    stop = dbm.current_stop_for_index(state.get("stop_index", 0))
+    state["stop_name"] = stop["name"] if stop else None
+    state["stop_id"] = stop["id"] if stop else None
+    state["status"] = bus_status.get(bus_id)
+    return jsonify(state)
+
+@app.post("/driver/reset")
+@login_required
+@role_required('driver')
+def driver_reset():
+    """Manual reset button for driver - resets bus to starting stop"""
+    data = request.get_json(force=True)
+    bus_id = data.get("bus_id", BUS_ID)
+    
+    # verify the driver is assigned to this bus
+    if bus_id != session.get('bus_id'):
+        return jsonify({"error": "unauthorized"}), 403
+    
+    # Reset bus to start
+    reset_bus_to_start()
+    
+    # Get updated state
+    state = dbm.get_bus_state(bus_id)
+    if state:
+        state = dict(state)
+        stop = dbm.current_stop_for_index(state.get("stop_index", 0))
+        state.update({
+            "stop_name": stop["name"] if stop else None,
+            "stop_id": stop["id"] if stop else None,
+            "status": bus_status.get(bus_id)
+        })
+        return jsonify(state)
+    
+    return jsonify({"error": "Failed to reset bus"}), 500
+
+@app.post("/student/arrived")
+@login_required
+@role_required('student')
+def student_arrived():
+    data = request.get_json(force=True)
+    bus_id = data.get("bus_id", BUS_ID)
+    student_id = session.get('username', 'S1')  # Use logged in username as student ID
+
+    state = dbm.get_bus_state(bus_id)
+    if not state:
+        return jsonify({"error": "bus not found"}), 404
+
+    stop_index = state["stop_index"]
+    stop = dbm.current_stop_for_index(stop_index)
+    if not stop:
+        return jsonify({"error": "stop not found"}), 404
+
+    dbm.insert_confirmation(bus_id, stop["id"], "student", student_id)
+    cnt = dbm.count_confirmations(bus_id, stop["id"])
+
+    moved = False
+    new_state: Dict[str, Any] = dict(state)
+    if cnt >= QUORUM:
+        new_state = dbm.move_bus_to_next_stop(bus_id)
+        moved = True
+        bus_status.pop(bus_id, None)
+
+    # augment response
+    curr_stop = dbm.current_stop_for_index(new_state.get("stop_index", 0))
+    new_state["stop_name"] = curr_stop["name"] if curr_stop else None
+    new_state["stop_id"] = curr_stop["id"] if curr_stop else None
+    new_state["status"] = bus_status.get(bus_id)
+
+    return jsonify({"confirmations": cnt, "moved": moved, "state": new_state})
+
+@app.get("/confirmations")
+@login_required
+def get_confirmations():
+    bus_id = request.args.get("bus_id", BUS_ID)
+    stop_id = int(request.args.get("stop_id", "0"))
+    cnt = dbm.count_confirmations(bus_id, stop_id)
+    return jsonify({"bus_id": bus_id, "stop_id": stop_id, "confirmations": cnt})
+
+
+if __name__ == "__main__":
+    dbm.init_db()
+    app.run(debug=True) 

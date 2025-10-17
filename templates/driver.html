@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Driver - Bus Tracker</title>
+  <link rel="stylesheet" href="/static/main.css" />
+  <style>
+    .driver-info {
+      padding: 20px;
+      margin-top: 20px;
+    }
+    .info-box {
+      background: #fff;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .info-label {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 4px;
+    }
+    .info-value {
+      font-size: 24px;
+      font-weight: 600;
+      color: #111;
+    }
+    .info-value.highlight {
+      color: #059669;
+    }
+    .status-bar {
+      background: #ecfdf5;
+      padding: 16px;
+      border-radius: 12px;
+      margin-bottom: 16px;
+    }
+    .actions {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 20px;
+      background: #fff;
+      box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+    }
+    .btn {
+      width: 100%;
+      font-size: 20px;
+      padding: 20px;
+      border-radius: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="driver-info">
+    <div class="status-bar">
+      <div class="status-main">
+        <span id="statusText">At </span>
+        <span id="curr" class="highlight">...</span>
+        <span id="lastUpdate" class="timestamp-badge">--:--</span>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <div class="info-label">Current Stop</div>
+      <div id="currentStop" class="info-value highlight">...</div>
+    </div>
+
+    <div class="info-box">
+      <div class="info-label">Next Stop</div>
+      <div id="nextStop" class="info-value">...</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="departedBtn" class="btn">DEPARTED</button>
+    <button id="shareLocationBtn" class="location-btn" title="Share Location">
+      <svg viewBox="0 0 24 24" style="transform: translateY(1px)">
+        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zM12 6.5l2.5 2.5h-2v3h-1v-3h-2L12 6.5z"/>
+      </svg>
+    </button>
+    <button id="resetBtn" class="reset-btn" title="Reset Bus">
+      <svg viewBox="0 0 24 24">
+        <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <style>
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 120px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #333;
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 24px;
+      font-size: 14px;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      z-index: 2000;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    /* Reset button styles */
+    .reset-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #ff9500;
+      border: none;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      transition: all 0.3s ease;
+      flex-shrink: 0;
+    }
+
+    .reset-btn:active {
+      transform: scale(0.95);
+    }
+
+    .reset-btn svg {
+      width: 28px;
+      height: 28px;
+      fill: #fff;
+    }
+    /* Location sharing button styles */
+    .location-btn {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #ff3b30;
+      border: none;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      transition: all 0.3s ease;
+      flex-shrink: 0;
+    }
+
+    .location-btn:active {
+      transform: scale(0.95);
+    }
+
+    .location-btn.active {
+      background: #34c759;
+    }
+
+    .location-btn svg {
+      width: 28px;
+      height: 28px;
+      fill: #000;
+    }
+
+    /* Updated actions container */
+    .actions {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #fff;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+      min-height: 88px;
+      box-sizing: border-box;
+    }
+
+    .actions .btn {
+      flex: 1;
+      max-width: 200px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0;
+    }
+  </style>
+
+  <script>
+    const POLL_MS = 1000;
+    const BUS_ID = "{{ bus_id }}";
+
+    // Show toast notification
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, 2000);
+    }
+  </script>
+  <script>
+    let locationWatchId = null;
+
+    function handleLocationError(error) {
+      console.error('Error getting location:', error);
+      const btn = document.getElementById('shareLocationBtn');
+      btn.classList.remove('active');
+      showToast('Could not get location. Please check GPS settings.');
+    }
+
+    function shareLocation(position) {
+      const { latitude, longitude, accuracy } = position.coords;
+      
+      fetch('/location/share', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          bus_id: BUS_ID,
+          lat: latitude,
+          lon: longitude,
+          accuracy: accuracy
+        })
+      }).then(r => r.json()).then(state => {
+        // Status updates are handled by the regular refresh function
+        if (state.error) {
+          console.error('Location share error:', state.error);
+        } else {
+          refresh();
+        }
+      }).catch(error => {
+        console.error('Error sharing location:', error);
+      });
+    }
+
+    document.getElementById('shareLocationBtn').addEventListener('click', function() {
+      if (!locationWatchId) {
+        // Start sharing location
+        if ("geolocation" in navigator) {
+          this.classList.add('active');
+          showToast('GPS Tracking Started');
+          
+          // Get initial position
+          navigator.geolocation.getCurrentPosition(shareLocation, handleLocationError, {
+            enableHighAccuracy: true,
+            timeout: 5000,
+            maximumAge: 0
+          });
+          
+          // Set up continuous watching
+          locationWatchId = navigator.geolocation.watchPosition(shareLocation, handleLocationError, {
+            enableHighAccuracy: true,
+            timeout: 5000,
+            maximumAge: 1000
+          });
+        } else {
+          showToast('Geolocation not supported');
+        }
+      } else {
+        // Stop sharing location
+        navigator.geolocation.clearWatch(locationWatchId);
+        locationWatchId = null;
+        this.classList.remove('active');
+        showToast('GPS Tracking Stopped');
+      }
+    });
+
+    // Reset button handler
+    document.getElementById('resetBtn').addEventListener('click', function() {
+      if (confirm('Reset bus to starting stop?')) {
+        fetch('/driver/reset', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ bus_id: BUS_ID })
+        }).then(r => r.json()).then(state => {
+          if (state.error) {
+            showToast('Error: ' + state.error);
+          } else {
+            showToast('Bus reset to start');
+            refresh();
+          }
+        }).catch(error => {
+          console.error('Reset error:', error);
+          showToast('Reset failed');
+        });
+      }
+    });
+    function refresh() {
+      fetch(`/bus/${BUS_ID}`).then(r=>r.json()).then(state => {
+        // Update timestamp
+        const now = new Date();
+        const time = now.getHours().toString().padStart(2, '0') + ':' + 
+                    now.getMinutes().toString().padStart(2, '0');
+        document.getElementById('lastUpdate').textContent = time;
+
+        // Get current and next stop info
+        fetch('/stops').then(r=>r.json()).then(stops => {
+          const idx = state.stop_index || 0;
+          const curr = stops.find(s => s.seq === idx);
+          const next = stops.find(s => s.seq === Math.min(idx + 1, stops.length - 1));
+          
+          const currentStop = curr ? curr.name : 'Unknown';
+          const nextStop = next ? next.name : '-';
+          const isMoving = state.status === 'departing';
+
+          // Update status display
+          document.getElementById('statusText').textContent = isMoving ? 'Moving to ' : 'At ';
+          document.getElementById('curr').textContent = isMoving ? nextStop : currentStop;
+          
+          // Update info boxes
+          document.getElementById('currentStop').textContent = currentStop;
+          document.getElementById('nextStop').textContent = nextStop;
+        });
+
+        // Update status banner appearance
+        const banner = document.querySelector('.status-banner');
+        banner.classList.toggle('moving', state.status === 'departing');
+        
+        if (state.lat == null || state.lon == null) return;
+        if (!busMarker) {
+          busMarker = L.marker([state.lat, state.lon], { 
+            icon: L.divIcon({
+              html: '🚌',
+              className: `bus-marker-icon ${state.status === 'departing' ? 'moving' : 'stopped'}`,
+              iconSize: [56, 56],
+              iconAnchor: [28, 28]
+            })
+          }).addTo(map);
+          map.setView([state.lat, state.lon]);
+        } else {
+          busMarker.setIcon(L.divIcon({
+            html: '🚌',
+            className: `bus-marker-icon ${state.status === 'departing' ? 'moving' : 'stopped'}`,
+            iconSize: [56, 56],
+            iconAnchor: [28, 28]
+          }));
+          if (lastLat !== state.lat || lastLon !== state.lon) {
+            busMarker.setLatLng([state.lat, state.lon]);
+            map.setView([state.lat, state.lon]);
+          }
+        }
+        lastLat = state.lat; lastLon = state.lon;
+      }).catch(()=>{});
+    }
+
+    document.getElementById('departedBtn').onclick = () => {
+      fetch('/driver/departed', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ bus_id: BUS_ID })
+      }).then(r => r.json()).then(resp => {
+        if (resp.error) {
+          showToast(resp.message || resp.error);
+        } else {
+          showToast('Departed');
+          refresh();
+        }
+      }).catch(error => {
+        console.error('Departed error:', error);
+      });
+    };
+
+    refresh();
+    setInterval(refresh, POLL_MS);
+  </script>
+</body>
+</html> 
