@@ -24,7 +24,8 @@ A real-time GPS-based bus tracking system with automatic stop detection, locatio
 
 ### Core Functionality
 - **Real-time GPS Tracking**: Driver location updates bus position automatically
-- **Automatic Stop Detection**: Smart detection when bus arrives at stops (within 40 meters)
+- **Automatic Stop Detection**: Smart detection when bus arrives at stops (within 50 meters)
+- **Snap-to-Stop**: Bus marker snaps to stop coordinates when within detection radius
 - **Daily Reset System**: Automatically resets bus to starting stop at midnight
 - **Role-Based Access**: Separate interfaces for drivers and students
 - **Session Management**: Secure, persistent user sessions
@@ -32,12 +33,13 @@ A real-time GPS-based bus tracking system with automatic stop detection, locatio
 
 ### Advanced Features
 - **Driver Live Location**: Bus position updates in real-time from driver's GPS
-- **Smart Proximity Detection**: Auto-detects when driver is near a stop
+- **Smart Proximity Detection**: Auto-detects when driver is within 50m of a stop
+- **Intelligent Status Updates**: "At Stop" when near, "Moving to [Next Stop]" when departing
 - **Fallback Manual Controls**: Arrived/Departed buttons work when GPS is unavailable (>30s)
-- **Manual Reset Button**: Driver can manually reset bus to starting point
+- **Manual Reset Button**: Driver can manually reset bus to starting point (below Next Stop section)
 - **Map Center Control**: "Center on Bus" button for easy navigation
 - **Toast Notifications**: User-friendly feedback messages
-- **Responsive Design**: Mobile-first UI for on-the-go usage
+- **Responsive Design**: Mobile-first UI with consistent button spacing
 
 ## 🏗️ System Architecture
 
@@ -198,16 +200,19 @@ gunicorn -w 4 -b 0.0.0.0:8000 wsgi:application
 
 1. **Login** at `/login` with driver credentials
 2. **Share Location**: Click the location sharing button (red pin icon) to start GPS tracking
-3. **Automatic Updates**: System auto-detects arrival at stops based on GPS proximity
-4. **Monitor**: View current stop, next stop, and status updates
-5. **Manual Override**: Use "DEPARTED" button only if GPS is unavailable (shows error if GPS is active)
-6. **Reset Bus**: Click reset button to manually return bus to starting stop
+3. **Automatic Updates**: System auto-detects arrival at stops based on GPS proximity (≤50m)
+4. **Snap-to-Stop**: Bus marker snaps to exact stop coordinates when within 50 meters
+5. **Status Updates**: View "At [Stop Name]" or "Moving to [Next Stop]" automatically
+6. **Monitor**: View current stop, next stop, and status updates in real-time
+7. **Manual Override**: Use "DEPARTED" button only if GPS is unavailable (shows error if GPS is active)
+8. **Reset Bus**: Click reset button (below Next Stop section) to manually return bus to starting stop
 
 **GPS Tracking Behavior:**
 - When GPS is active (updated within last 30 seconds), manual buttons are disabled
-- Bus automatically moves to detected stop when driver is within 40 meters
-- "At Stop" status set automatically when near a stop
-- "Departing" status set automatically when moving away from stops
+- Bus automatically snaps to stop when driver is within 50 meters
+- "At Stop X" status set automatically when near a stop
+- "Moving to [Next Stop]" status set automatically when >50m from current stop
+- Bus marker shows exact GPS location when not near any stop
 
 #### For Students
 
@@ -272,9 +277,12 @@ Share current GPS location (**driver only** - students receive 403 error).
 
 **Behavior:**
 - Updates bus location to driver's GPS coordinates
-- Auto-detects proximity to stops (within 40 meters)
+- Auto-detects proximity to stops (within 50 meters)
+- **Snaps to stop coordinates** when within detection radius
 - Automatically changes stop when driver approaches a new stop
-- Sets status to "arrived" when near a stop, "departing" otherwise
+- Sets status to "arrived" when near a stop
+- Sets status to "departing" when >50m from current stop and moving away
+- Provides next stop name in "Moving to [Stop]" status
 
 **Rate Limit:** 1 request per second per user
 
@@ -547,20 +555,24 @@ docker run -p 8000:8000 -e FLASK_SECRET_KEY=your-key bus-tracker
 
 ### GPS-Based Location Tracking
 
-The system uses driver GPS for real-time bus positioning:
+The system uses driver GPS for real-time bus positioning with intelligent stop detection:
 
 1. **Driver GPS Priority**: Only driver's location updates bus position
-2. **Proximity Detection**: Checks distance to all stops (40-meter radius)
-3. **Automatic Stop Updates**: Changes to nearest stop when in proximity
-4. **Continuous Tracking**: Updates every second while GPS is active
+2. **Proximity Detection**: Checks distance to all stops (50-meter radius)
+3. **Snap-to-Stop**: When within 50m, bus marker snaps to exact stop coordinates
+4. **Automatic Stop Updates**: Changes to nearest stop when in proximity
+5. **Continuous Tracking**: Updates every second while GPS is active
+6. **Smart Status**: "At [Stop]" when near, "Moving to [Next Stop]" when departing
 
 ### Automatic Stop Detection
 
 **Proximity-Based System:**
-- **Detection Radius**: 40 meters from stop coordinates
-- **Auto-arrival**: Status changes to "arrived" when within radius
-- **Auto-departure**: Status changes to "departing" when outside all stop radii
+- **Detection Radius**: 50 meters from stop coordinates
+- **Auto-arrival**: Status changes to "arrived" and snaps to stop when within radius
+- **Auto-departure**: Status changes to "departing" when >50m from current stop
+- **Next Stop Indication**: Shows which stop the bus is moving toward
 - **Haversine Formula**: Accurate distance calculation using GPS coordinates
+- **Clean Positioning**: Snaps to stop coordinates for consistent map display
 
 ### Daily Reset System
 
@@ -637,13 +649,16 @@ For issues, questions, or contributions:
 
 ### Version 3.1 - Current
 - [x] Driver-only GPS location sharing
-- [x] Automatic stop detection via proximity
+- [x] Automatic stop detection via proximity (50m radius)
+- [x] Snap-to-stop positioning for clean display
+- [x] Intelligent status updates ("At Stop" / "Moving to Next Stop")
 - [x] Daily midnight reset system
-- [x] Manual reset button for drivers
+- [x] Manual reset button (repositioned below Next Stop)
 - [x] Fallback manual controls with GPS check
 - [x] Map center control for students
 - [x] Toast notifications for user feedback
 - [x] "Coming Soon" message for student location sharing
+- [x] Consistent button spacing across interfaces
 
 ### Planned Features
 - [ ] Student location sharing (multi-user tracking)

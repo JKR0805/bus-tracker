@@ -279,28 +279,47 @@ def share_location():
         dbm.update_user_location(bus_id, user_id, user_type, lat, lon, accuracy)
         last_update_time[user_id] = now
         
-        # Update bus location directly with driver's GPS
-        state = dbm.update_bus_location(bus_id, lat, lon)
+        # Check proximity to stops FIRST (within 50 meters)
+        proximity_result = dbm.check_stop_proximity(bus_id, lat, lon, radius_meters=50)
         
-        # Check proximity to stops and auto-detect arrival
-        proximity_result = dbm.check_stop_proximity(bus_id, lat, lon, radius_meters=40)
+        current_state = dbm.get_bus_state(bus_id)
         
         if proximity_result:
-            # Driver is near a stop
+            # Driver is near a stop (within 50m)
             stop_id = proximity_result['id']
             stop_index = proximity_result['seq']
             
-            # Auto-update to this stop if not already there
-            current_state = dbm.get_bus_state(bus_id)
-            if current_state and current_state['stop_index'] != stop_index:
-                state = dbm.set_bus_to_stop(bus_id, stop_index)
-                bus_status[bus_id] = "arrived"
-            elif current_state and current_state['stop_index'] == stop_index:
-                # Already at this stop
-                bus_status[bus_id] = "arrived"
+            # Snap to stop coordinates for clean positioning
+            state = dbm.set_bus_to_stop(bus_id, stop_index)
+            bus_status[bus_id] = "arrived"
+            
+            app.logger.info(f"Bus {bus_id} arrived at stop {proximity_result['name']} (within 50m)")
         else:
-            # Not near any stop - mark as departing/en route
-            if bus_id in bus_status:
+            # Not near any stop - update to exact GPS coordinates
+            state = dbm.update_bus_location(bus_id, lat, lon)
+            
+            # Determine if departing from current stop
+            if current_state and current_state['stop_index'] is not None:
+                current_stop = dbm.current_stop_for_index(current_state['stop_index'])
+                if current_stop:
+                    # Check distance from current stop
+                    distance_from_current = dbm.calculate_distance(
+                        lat, lon, current_stop['lat'], current_stop['lon']
+                    )
+                    
+                    if distance_from_current > 50:
+                        # Moving away from current stop
+                        bus_status[bus_id] = "departing"
+                        # Get next stop for status message
+                        next_stop = dbm.current_stop_for_index(current_state['stop_index'] + 1)
+                        if next_stop:
+                            app.logger.info(f"Bus {bus_id} departing to {next_stop['name']}")
+                    else:
+                        # Still near current stop but not snapped
+                        bus_status[bus_id] = "arrived"
+                else:
+                    bus_status[bus_id] = "departing"
+            else:
                 bus_status[bus_id] = "departing"
         
         # Get updated state and stop info
@@ -419,7 +438,8 @@ def driver_departed():
         if seconds_since_update < 30:
             return jsonify({
                 "error": "Using live GPS - manual control disabled",
-                "message": "Bus position is being tracked via GPS"
+                "message": "Bus position is being tracked via GPS",
+                "gps_active": True
             }), 400
     
     # Fallback: set status to departing without moving
@@ -432,6 +452,7 @@ def driver_departed():
     resp["stop_name"] = stop["name"] if stop else None
     resp["stop_id"] = stop["id"] if stop else None
     resp["status"] = bus_status.get(bus_id)
+    resp["gps_active"] = False
     return jsonify(resp)
 
 @app.post("/driver/arrived")
@@ -453,7 +474,8 @@ def driver_arrived():
         if seconds_since_update < 30:
             return jsonify({
                 "error": "Using live GPS - manual control disabled",
-                "message": "Bus position is being tracked via GPS"
+                "message": "Bus position is being tracked via GPS",
+                "gps_active": True
             }), 400
     
     action = data.get("action")
@@ -467,6 +489,7 @@ def driver_arrived():
     state["stop_name"] = stop["name"] if stop else None
     state["stop_id"] = stop["id"] if stop else None
     state["status"] = bus_status.get(bus_id)
+    state["gps_active"] = False
     return jsonify(state)
 
 @app.post("/driver/reset")
@@ -492,19 +515,46 @@ def driver_reset():
         state.update({
             "stop_name": stop["name"] if stop else None,
             "stop_id": stop["id"] if stop else None,
-            "status": bus_status.get(bus_id)
+            "status": bus_status.get(bus_id),
+            "gps_active": False
         })
         return jsonify(state)
     
     return jsonify({"error": "Failed to reset bus"}), 500
 
+@app.post("/location/stop")
+@login_required
+@role_required('driver')
+def stop_location_sharing():
+    """Immediately stop GPS tracking and enable manual controls"""
+    bus_id = session.get('bus_id', BUS_ID)
+    
+    # Clear the GPS timestamp to immediately enable manual controls
+    last_driver_update.pop(bus_id, None)
+    
+    app.logger.info(f"GPS tracking stopped for bus {bus_id} - manual controls enabled")
+    
+    return jsonify({
+        "message": "GPS tracking stopped",
+        "gps_active": False
+    })
+
 @app.post("/student/arrived")
 @login_required
 @role_required('student')
 def student_arrived():
+    """Students can confirm arrival - but only moves bus if GPS is inactive (>30s)"""
     data = request.get_json(force=True)
     bus_id = data.get("bus_id", BUS_ID)
     student_id = session.get('username', 'S1')  # Use logged in username as student ID
+
+    # Check if driver's GPS is active
+    now = datetime.now()
+    gps_active = False
+    if bus_id in last_driver_update:
+        seconds_since_update = (now - last_driver_update[bus_id]).total_seconds()
+        if seconds_since_update < 30:
+            gps_active = True
 
     state = dbm.get_bus_state(bus_id)
     if not state:
@@ -515,23 +565,30 @@ def student_arrived():
     if not stop:
         return jsonify({"error": "stop not found"}), 404
 
+    # Always record the confirmation
     dbm.insert_confirmation(bus_id, stop["id"], "student", student_id)
     cnt = dbm.count_confirmations(bus_id, stop["id"])
 
     moved = False
     new_state: Dict[str, Any] = dict(state)
-    if cnt >= QUORUM:
+    
+    # Only move bus if GPS is NOT active and quorum is reached
+    if cnt >= QUORUM and not gps_active:
         new_state = dbm.move_bus_to_next_stop(bus_id)
         moved = True
         bus_status.pop(bus_id, None)
+    elif cnt >= QUORUM and gps_active:
+        # Quorum reached but GPS is active - don't move
+        app.logger.info(f"Student confirmation quorum reached for bus {bus_id}, but GPS is active - ignoring manual control")
 
     # augment response
     curr_stop = dbm.current_stop_for_index(new_state.get("stop_index", 0))
     new_state["stop_name"] = curr_stop["name"] if curr_stop else None
     new_state["stop_id"] = curr_stop["id"] if curr_stop else None
     new_state["status"] = bus_status.get(bus_id)
+    new_state["gps_active"] = gps_active  # Add GPS status to response
 
-    return jsonify({"confirmations": cnt, "moved": moved, "state": new_state})
+    return jsonify({"confirmations": cnt, "moved": moved, "state": new_state, "gps_active": gps_active})
 
 @app.get("/confirmations")
 @login_required
@@ -540,6 +597,28 @@ def get_confirmations():
     stop_id = int(request.args.get("stop_id", "0"))
     cnt = dbm.count_confirmations(bus_id, stop_id)
     return jsonify({"bus_id": bus_id, "stop_id": stop_id, "confirmations": cnt})
+
+@app.get("/gps/status")
+@login_required
+def get_gps_status():
+    """Check if driver's GPS is currently active"""
+    bus_id = request.args.get("bus_id", BUS_ID)
+    
+    now = datetime.now()
+    gps_active = False
+    last_update_time = None
+    
+    if bus_id in last_driver_update:
+        last_update_time = last_driver_update[bus_id]
+        seconds_since_update = (now - last_update_time).total_seconds()
+        if seconds_since_update < 30:
+            gps_active = True
+    
+    return jsonify({
+        "bus_id": bus_id,
+        "gps_active": gps_active,
+        "last_update": last_update_time.isoformat() if last_update_time else None
+    })
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@
         <span id="statusText">At </span>
         <span id="curr" class="highlight">...</span>
         <span id="nextStop"></span>
+        <span id="gpsIndicator" class="gps-indicator" style="display: none;">📍 Live</span>
       </div>
       <span id="lastUpdate" class="timestamp-badge">--:--</span>
     </div>
@@ -84,6 +85,18 @@
       height: 24px;
       fill: #333;
     }
+
+    /* GPS indicator badge */
+    .gps-indicator {
+      background: #34c759;
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-left: 8px;
+      display: inline-block;
+    }
     /* Location sharing button styles */
     .location-btn {
       width: 56px;
@@ -114,7 +127,7 @@
       fill: #000;
     }
 
-    /* Updated actions container */
+    /* Updated actions container - fixed spacing */
     .actions {
       position: fixed;
       left: 0;
@@ -269,19 +282,49 @@
       }).catch(()=>{});
     }
 
+    function checkGPSStatus() {
+      fetch(`/gps/status?bus_id=${encodeURIComponent(BUS_ID)}`)
+        .then(r => r.json())
+        .then(data => {
+          const indicator = document.getElementById('gps-indicator');
+          if (data.gps_active) {
+            indicator.style.display = 'inline-block';
+          } else {
+            indicator.style.display = 'none';
+          }
+        })
+        .catch(err => console.error('GPS check error:', err));
+    }
+
     document.getElementById('arrivedBtn').onclick = () => {
       fetch('/student/arrived', {
         method: 'POST', headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ bus_id: BUS_ID, student_id: STUDENT_ID })
       }).then(r => r.json()).then(resp => {
-        // No banner element in current layout; keep behavior minimal
+        // Show feedback based on GPS status
+        if (resp.gps_active && !resp.moved) {
+          showToast('Confirmation recorded - GPS tracking active');
+        } else if (resp.moved) {
+          showToast('Bus moved to next stop');
+        } else {
+          showToast('Confirmation recorded');
+        }
+        
+        // Update confirmation count and state
         if (resp.state && resp.state.stop_id) updateCount(resp.state.stop_id);
         loadState();
+      }).catch(error => {
+        console.error('Error:', error);
+        showToast('Error recording confirmation');
       });
     };
 
     loadState();
     setInterval(loadState, POLL_MS);
+    
+    // Check GPS status periodically (every 5 seconds)
+    checkGPSStatus();
+    setInterval(checkGPSStatus, 5000);
   </script>
 </body>
 </html> 
